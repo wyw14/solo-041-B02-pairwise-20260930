@@ -10,6 +10,7 @@ import (
 	"github.com/wyw14/cry-97/internal/dosing"
 	"github.com/wyw14/cry-97/internal/intake"
 	"github.com/wyw14/cry-97/internal/journal"
+	"github.com/wyw14/cry-97/internal/lab"
 	"github.com/wyw14/cry-97/internal/model"
 	"github.com/wyw14/cry-97/internal/settling"
 	"github.com/wyw14/cry-97/internal/sludge"
@@ -35,6 +36,7 @@ type LineStatus struct {
 	Valves        []discharge.Valve      `json:"valves"`
 	Commands      []model.DeviceCommand  `json:"commands"`
 	AlarmCount    int                    `json:"alarm_count"`
+	PendingReview []lab.PendingResult    `json:"pending_review"`
 	ObservedAt    time.Time              `json:"observed_at"`
 }
 
@@ -91,7 +93,8 @@ func (p *Plant) Status(lineID model.LineID) (LineStatus, error) {
 		Compensations: p.compensations.Pending(),
 		Pumps:         filterPumps(p.pumps.Snapshot(), lineID), Blowers: p.aeration.Blowers(),
 		Valves: p.valves.Snapshot(), Commands: p.devices.All(),
-		AlarmCount: len(p.alarms.Active(lineID)), ObservedAt: p.now().UTC(),
+		AlarmCount: len(p.alarms.Active(lineID)), PendingReview: p.labResults.PendingForLine(lineID),
+		ObservedAt: p.now().UTC(),
 	}, nil
 }
 

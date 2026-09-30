@@ -38,6 +38,10 @@ func (b *PermitBook) ApplyResult(result model.LabResult, now time.Time) (Permit,
 	if !result.Valid || result.SampleID == uuid.Nil || result.BatchID == uuid.Nil || result.Revision == 0 {
 		return Permit{}, errors.New("permit result is invalid")
 	}
+	// An isolated line can never be granted (or retain) a discharge permit.
+	if b.valves.Isolated(result.LineID) {
+		return Permit{}, ErrLineIsolated
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	current, exists := b.byBatch[result.BatchID]
@@ -51,6 +55,7 @@ func (b *PermitBook) ApplyResult(result model.LabResult, now time.Time) (Permit,
 			current.SampleRevision = result.Revision
 			current.RevokedAt = &stamp
 			b.byBatch[result.BatchID] = current
+			// Revocation must not leave the valve open on the old permit.
 			if err := b.valves.Hold(result.LineID, now); err != nil {
 				return Permit{}, err
 			}
@@ -67,6 +72,29 @@ func (b *PermitBook) ApplyResult(result model.LabResult, now time.Time) (Permit,
 	}
 	b.byBatch[result.BatchID] = permit
 	return permit, nil
+}
+
+// RevokeLine revokes every active permit on a line that has been put under
+// emergency isolation and locks its valve. It is the single choke point that
+// guarantees no stale permit survives an isolation event.
+func (b *PermitBook) RevokeLine(lineID model.LineID, now time.Time) (int, error) {
+	b.mu.Lock()
+	stamp := now.UTC()
+	revoked := 0
+	for batchID, permit := range b.byBatch {
+		if permit.LineID != lineID || !permit.Active {
+			continue
+		}
+		permit.Active = false
+		permit.RevokedAt = &stamp
+		b.byBatch[batchID] = permit
+		revoked++
+	}
+	b.mu.Unlock()
+	if err := b.valves.Isolate(lineID, now); err != nil {
+		return revoked, err
+	}
+	return revoked, nil
 }
 
 func (b *PermitBook) Current(batchID uuid.UUID) (Permit, bool) {

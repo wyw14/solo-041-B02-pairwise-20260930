@@ -52,6 +52,11 @@ func (p *Plant) ApplyRecovered(ctx context.Context, event model.Event) error {
 		state = state.Isolate(event.Sequence, event.OccurredAt)
 		p.lines[event.LineID] = state
 		p.devices.StopLine(event.LineID, state.Generation)
+		// Re-assert the discharge lockdown after a restart so an isolated line
+		// never resumes with an old permit or an open valve.
+		if _, err := p.permits.RevokeLine(event.LineID, event.OccurredAt); err != nil {
+			return err
+		}
 		return nil
 	}
 	if event.Kind == model.EventDeviceCommanded {

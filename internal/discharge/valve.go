@@ -10,6 +10,10 @@ import (
 	"github.com/wyw14/cry-97/internal/model"
 )
 
+// ErrLineIsolated is returned when a discharge action is attempted on a line
+// that is under emergency isolation.
+var ErrLineIsolated = errors.New("discharge line is isolated")
+
 type Valve struct {
 	LineID    model.LineID     `json:"line_id"`
 	Kind      model.DeviceKind `json:"kind"`
@@ -19,15 +23,19 @@ type Valve struct {
 }
 
 type ValveController struct {
-	mu     sync.RWMutex
-	valves map[model.LineID]Valve
+	mu       sync.RWMutex
+	valves   map[model.LineID]Valve
+	isolated map[model.LineID]bool
 }
 
 func NewValveController(lines []model.LineID) (*ValveController, error) {
 	if len(lines) == 0 {
 		return nil, errors.New("discharge lines are required")
 	}
-	controller := &ValveController{valves: make(map[model.LineID]Valve, len(lines))}
+	controller := &ValveController{
+		valves:   make(map[model.LineID]Valve, len(lines)),
+		isolated: make(map[model.LineID]bool, len(lines)),
+	}
 	for _, lineID := range lines {
 		if lineID == "" {
 			return nil, errors.New("discharge line is empty")
@@ -37,12 +45,17 @@ func NewValveController(lines []model.LineID) (*ValveController, error) {
 	return controller, nil
 }
 
+// Open opens the discharge valve for an active permit. It refuses any line that
+// is under emergency isolation, regardless of the presented permit.
 func (c *ValveController) Open(lineID model.LineID, permitID uuid.UUID, now time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	valve, ok := c.valves[lineID]
 	if !ok || permitID == uuid.Nil {
 		return errors.New("discharge valve target is invalid")
+	}
+	if c.isolated[lineID] {
+		return ErrLineIsolated
 	}
 	valve.Open = true
 	valve.PermitID = permitID
@@ -63,6 +76,29 @@ func (c *ValveController) Hold(lineID model.LineID, now time.Time) error {
 	valve.UpdatedAt = now.UTC()
 	c.valves[lineID] = valve
 	return nil
+}
+
+// Isolate marks a line as emergency isolated and forces its valve shut and
+// released from any permit. The isolation persists until the line is rebuilt.
+func (c *ValveController) Isolate(lineID model.LineID, now time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	valve, ok := c.valves[lineID]
+	if !ok {
+		return errors.New("discharge valve is not found")
+	}
+	c.isolated[lineID] = true
+	valve.Open = false
+	valve.PermitID = uuid.Nil
+	valve.UpdatedAt = now.UTC()
+	c.valves[lineID] = valve
+	return nil
+}
+
+func (c *ValveController) Isolated(lineID model.LineID) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.isolated[lineID]
 }
 
 func (c *ValveController) Snapshot() []Valve {

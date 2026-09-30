@@ -14,6 +14,10 @@ import (
 type QualificationOutcome struct {
 	Batch  model.Batch       `json:"batch"`
 	Permit *discharge.Permit `json:"permit,omitempty"`
+	// Pending is set when the result could not be applied to the batch and was
+	// filed for manual review instead (for example, a late result for a line
+	// under emergency isolation). In that case Batch is left untouched.
+	Pending *lab.PendingResult `json:"pending_review,omitempty"`
 }
 
 func (p *Plant) SubmitLabPayload(ctx context.Context, payload []byte) (QualificationOutcome, error) {
@@ -42,6 +46,23 @@ func (p *Plant) ApplyLabResult(ctx context.Context, result model.LabResult, now 
 		p.mu.Unlock()
 		return QualificationOutcome{}, errors.New("lab result batch is not found")
 	}
+	if batch.LineID != result.LineID {
+		p.mu.Unlock()
+		return QualificationOutcome{}, errors.New("lab result does not belong to the batch line")
+	}
+	state, lineOK := p.lines[result.LineID]
+	if !lineOK {
+		p.mu.Unlock()
+		return QualificationOutcome{}, errors.New("lab result line is not found")
+	}
+	// A line under emergency isolation is out of service. A late (or revised)
+	// lab result must not qualify the batch, issue a permit, or move the valve;
+	// it is filed for manual review only and the batch keeps its current state.
+	if state.Emergency || state.Stage == model.StageIsolated {
+		p.mu.Unlock()
+		pending := p.labResults.HoldForReview(result, lab.ReasonLineIsolated, now)
+		return QualificationOutcome{Batch: batch, Pending: &pending}, nil
+	}
 	updated, err := batch.ApplyQualification(result, now)
 	if err != nil {
 		p.mu.Unlock()
@@ -68,4 +89,13 @@ func (p *Plant) ApplyLabResult(ctx context.Context, result model.LabResult, now 
 
 func (p *Plant) Permits() []discharge.Permit {
 	return p.permits.All()
+}
+
+// PendingLabResults returns every lab result awaiting manual review, oldest
+// first. When lineID is non-empty it is filtered to that line.
+func (p *Plant) PendingLabResults(lineID model.LineID) []lab.PendingResult {
+	if lineID == "" {
+		return p.labResults.Pending()
+	}
+	return p.labResults.PendingForLine(lineID)
 }

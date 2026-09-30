@@ -39,6 +39,11 @@ func (p *Plant) EmergencyStop(ctx context.Context, lineID model.LineID, reason s
 	p.mu.Unlock()
 	p.devices.StopLine(lineID, state.Generation)
 	p.equalizers.Release(lineID)
+	// No permit granted before the isolation may keep discharging: revoke every
+	// active permit on the line and force its valve shut and locked.
+	if _, err := p.permits.RevokeLine(lineID, now); err != nil {
+		return model.LineState{}, err
+	}
 	p.alarms.Raise(model.NewAlarm(lineID, "PROCESS_EMERGENCY", reason, model.SeverityCritical, now))
 	if err := p.snapshots.Save(state); err != nil {
 		return model.LineState{}, err
