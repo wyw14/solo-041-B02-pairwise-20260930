@@ -14,19 +14,16 @@ import (
 type QualificationOutcome struct {
 	Batch  model.Batch       `json:"batch"`
 	Permit *discharge.Permit `json:"permit,omitempty"`
+	Review *lab.ReviewRecord `json:"review,omitempty"`
 }
 
 func (p *Plant) SubmitLabPayload(ctx context.Context, payload []byte) (QualificationOutcome, error) {
 	now := p.now()
-	result, decodeErr := lab.Decode(payload, now)
-	outcome, applyErr := p.ApplyLabResult(ctx, result, now)
-	if decodeErr != nil {
-		return QualificationOutcome{}, decodeErr
+	result, err := lab.Decode(payload, now)
+	if err != nil {
+		return QualificationOutcome{}, err
 	}
-	if applyErr != nil {
-		return QualificationOutcome{}, applyErr
-	}
-	return outcome, nil
+	return p.ApplyLabResult(ctx, result, now)
 }
 
 func (p *Plant) ApplyLabResult(ctx context.Context, result model.LabResult, now time.Time) (QualificationOutcome, error) {
@@ -42,13 +39,25 @@ func (p *Plant) ApplyLabResult(ctx context.Context, result model.LabResult, now 
 		p.mu.Unlock()
 		return QualificationOutcome{}, errors.New("lab result batch is not found")
 	}
+	if result.LineID != batch.LineID {
+		p.mu.Unlock()
+		return QualificationOutcome{}, errors.New("lab result line does not match batch")
+	}
+	line := p.lines[batch.LineID]
+	if line.Emergency || line.Stage == model.StageIsolated {
+		// Late results for an isolated line never qualify the batch, issue
+		// permits or move valves: they are quarantined for manual review and
+		// the batch keeps its pre-isolation discharge state.
+		p.mu.Unlock()
+		record := p.labResults.StageForReview(result, lab.ReviewReasonIsolated, now)
+		return QualificationOutcome{Batch: batch, Review: &record}, nil
+	}
 	updated, err := batch.ApplyQualification(result, now)
 	if err != nil {
 		p.mu.Unlock()
 		return QualificationOutcome{}, err
 	}
 	p.batches[result.BatchID] = updated
-	line := p.lines[updated.LineID]
 	line.Stage = updated.Stage
 	line.UpdatedAt = now.UTC()
 	p.lines[updated.LineID] = line
@@ -68,4 +77,10 @@ func (p *Plant) ApplyLabResult(ctx context.Context, result model.LabResult, now 
 
 func (p *Plant) Permits() []discharge.Permit {
 	return p.permits.All()
+}
+
+// ReviewRecords lists lab results deferred for manual review (e.g. results
+// that arrived while their line was under emergency isolation).
+func (p *Plant) ReviewRecords() []lab.ReviewRecord {
+	return p.labResults.ReviewRecords()
 }

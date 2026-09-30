@@ -10,6 +10,7 @@ import (
 	"github.com/wyw14/cry-97/internal/dosing"
 	"github.com/wyw14/cry-97/internal/intake"
 	"github.com/wyw14/cry-97/internal/journal"
+	"github.com/wyw14/cry-97/internal/lab"
 	"github.com/wyw14/cry-97/internal/model"
 	"github.com/wyw14/cry-97/internal/settling"
 	"github.com/wyw14/cry-97/internal/sludge"
@@ -34,6 +35,7 @@ type LineStatus struct {
 	Blowers       []aeration.Blower      `json:"blowers"`
 	Valves        []discharge.Valve      `json:"valves"`
 	Commands      []model.DeviceCommand  `json:"commands"`
+	ReviewRecords []lab.ReviewRecord     `json:"review_records"`
 	AlarmCount    int                    `json:"alarm_count"`
 	ObservedAt    time.Time              `json:"observed_at"`
 }
@@ -84,13 +86,19 @@ func (p *Plant) Status(lineID model.LineID) (LineStatus, error) {
 	if value, found := p.sequences.Current(lineID); found {
 		sequence = &value
 	}
+	reviewRecords := make([]lab.ReviewRecord, 0)
+	for _, record := range p.labResults.ReviewRecords() {
+		if record.Result.LineID == lineID {
+			reviewRecords = append(reviewRecords, record)
+		}
+	}
 	return LineStatus{
 		Line: line, Batch: batch, Intake: admission, Equalizers: p.equalizers.Snapshot(), Dose: dose, LabResult: labResult, Permit: permit,
 		Cycle: cycle, Handover: handover, Sequence: sequence, Settling: settlingState.Snapshot(),
 		Samples: p.sampler.LineSnapshot(lineID), SampleCursor: p.receiver.Current(lineID),
 		Compensations: p.compensations.Pending(),
 		Pumps:         filterPumps(p.pumps.Snapshot(), lineID), Blowers: p.aeration.Blowers(),
-		Valves: p.valves.Snapshot(), Commands: p.devices.All(),
+		Valves: p.valves.Snapshot(), Commands: p.devices.All(), ReviewRecords: reviewRecords,
 		AlarmCount: len(p.alarms.Active(lineID)), ObservedAt: p.now().UTC(),
 	}, nil
 }

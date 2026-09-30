@@ -22,16 +22,21 @@ type Permit struct {
 }
 
 type PermitBook struct {
-	mu      sync.RWMutex
-	byBatch map[uuid.UUID]Permit
-	valves  *ValveController
+	mu       sync.RWMutex
+	byBatch  map[uuid.UUID]Permit
+	valves   *ValveController
+	isolated map[model.LineID]bool
 }
 
 func NewPermitBook(valves *ValveController) (*PermitBook, error) {
 	if valves == nil {
 		return nil, errors.New("permit book requires valve controller")
 	}
-	return &PermitBook{byBatch: make(map[uuid.UUID]Permit), valves: valves}, nil
+	return &PermitBook{
+		byBatch:  make(map[uuid.UUID]Permit),
+		valves:   valves,
+		isolated: make(map[model.LineID]bool),
+	}, nil
 }
 
 func (b *PermitBook) ApplyResult(result model.LabResult, now time.Time) (Permit, error) {
@@ -40,6 +45,11 @@ func (b *PermitBook) ApplyResult(result model.LabResult, now time.Time) (Permit,
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.isolated[result.LineID] {
+		// An isolated line can neither receive new permits nor have its permit
+		// book touched by late lab results; review happens out of band.
+		return Permit{}, ErrLineIsolated
+	}
 	current, exists := b.byBatch[result.BatchID]
 	if exists && current.SampleID == result.SampleID && result.Revision <= current.SampleRevision {
 		return current, errors.New("permit result revision is stale")
@@ -67,6 +77,39 @@ func (b *PermitBook) ApplyResult(result model.LabResult, now time.Time) (Permit,
 	}
 	b.byBatch[result.BatchID] = permit
 	return permit, nil
+}
+
+// Isolate revokes every active permit on the line and locks the discharge
+// valve. Late results afterwards are refused until Release is called.
+func (b *PermitBook) Isolate(lineID model.LineID, now time.Time) error {
+	b.mu.Lock()
+	b.isolated[lineID] = true
+	stamp := now.UTC()
+	for batchID, permit := range b.byBatch {
+		if permit.LineID != lineID || !permit.Active {
+			continue
+		}
+		permit.Active = false
+		permit.RevokedAt = &stamp
+		b.byBatch[batchID] = permit
+	}
+	b.mu.Unlock()
+	return b.valves.Isolate(lineID, now)
+}
+
+// Release clears the isolation lock; revoked permits stay revoked and a fresh
+// qualified result is required to discharge again.
+func (b *PermitBook) Release(lineID model.LineID) {
+	b.mu.Lock()
+	delete(b.isolated, lineID)
+	b.mu.Unlock()
+	b.valves.Release(lineID)
+}
+
+func (b *PermitBook) Isolated(lineID model.LineID) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.isolated[lineID]
 }
 
 func (b *PermitBook) Current(batchID uuid.UUID) (Permit, bool) {

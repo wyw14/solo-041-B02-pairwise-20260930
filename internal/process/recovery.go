@@ -15,6 +15,16 @@ func (p *Plant) RecoverLine(ctx context.Context, lineID model.LineID) (uint64, e
 		p.mu.Lock()
 		p.lines[lineID] = snapshot
 		p.mu.Unlock()
+		if snapshot.Emergency || snapshot.Stage == model.StageIsolated {
+			// Permits and valves live only in memory; re-secure them from the
+			// isolated snapshot since replay will skip events already covered
+			// by the snapshot cursor.
+			p.devices.StopLine(lineID, snapshot.Generation)
+			if err := p.permits.Isolate(lineID, p.now()); err != nil {
+				return 0, err
+			}
+			p.equalizers.Release(lineID)
+		}
 	}
 	replayer, err := journal.NewReplayer(p.store, p)
 	if err != nil {
@@ -52,6 +62,9 @@ func (p *Plant) ApplyRecovered(ctx context.Context, event model.Event) error {
 		state = state.Isolate(event.Sequence, event.OccurredAt)
 		p.lines[event.LineID] = state
 		p.devices.StopLine(event.LineID, state.Generation)
+		if err := p.permits.Isolate(event.LineID, event.OccurredAt); err != nil {
+			return err
+		}
 		return nil
 	}
 	if event.Kind == model.EventDeviceCommanded {
